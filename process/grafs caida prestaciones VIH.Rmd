@@ -1,0 +1,532 @@
+---
+title: "Caída de prestaciones (gráficos)"
+subtitle: "VIH"
+output: 
+---
+
+```{r RMD SETTINGS, message=FALSE, warning=FALSE}
+rm(list = ls()); gc() 
+knitr::opts_knit$set(root.dir = "~/Dropbox/Data IMED/Prestaciones/")
+```
+
+```{r LIBRERIAS, message=FALSE, warning=FALSE}
+library(disk.frame)
+library(data.table)
+library(tidyverse)
+library(lubridate)
+library(ggpubr)
+```
+
+# 1. Datos
+```{r DISK.FRAME SETTINGS, message=FALSE, warning=FALSE}
+setup_disk.frame(workers = 3)
+options(future.globals.maxSize = Inf)
+```
+
+```{r LOAD DATA YEAR, message=F}
+path_to_files <- "~/Dropbox/Data IMED/Prestaciones"
+
+list_files <- list.files(path = path_to_files, 
+                         pattern = "txb_resumenprestacion_u2020", 
+                         full.names = TRUE) 
+
+system.time(dat.2020 <- csv_to_disk.frame(infile = list_files,
+                                     backend = "data.table",
+                                     colClasses = list(character = c("coditem") ),
+                                     select = c("fecemision", "codprestacion", "sexobeneficiario", "edadbeneficiario", 
+                                                "codfinanciador", "rutbeneficiario", "codregion", "cantidad")))
+
+list_files <- list.files(path = path_to_files, 
+                         pattern = "txb_resumenprestacion_u2019", 
+                         full.names = TRUE) 
+
+system.time(dat.2019 <- csv_to_disk.frame(infile = list_files,
+                                     backend = "data.table",
+                                     colClasses = list(character = c("coditem") ),
+                                     select = c("fecemision", "codprestacion", "sexobeneficiario", "edadbeneficiario", 
+                                                "codfinanciador", "rutbeneficiario", "codregion", "cantidad")))
+
+list_files <- list.files(path = path_to_files, 
+                         pattern = "txb_resumenprestacion_u2018", 
+                         full.names = TRUE) 
+
+system.time(dat.2018 <- csv_to_disk.frame(infile = list_files,
+                                     backend = "data.table",
+                                     colClasses = list(character = c("coditem") ),
+                                     select = c("fecemision", "codprestacion", "sexobeneficiario", "edadbeneficiario", 
+                                                "codfinanciador", "rutbeneficiario", "codregion", "cantidad")))
+
+#system.time(dat <- as.data.table(dat.2020))
+
+rm(list_files, path_to_files)
+```
+
+```{r SELECCION PRESTACIONES}
+prestaciones <- fread("~/Dropbox/Data IMED/Diccionarios/dom_codprestacion_000", encoding = "UTF-8")
+
+trazadoras <- data.table(
+  cod_prest = c(c(101303, 101843, 101898),
+                306169,
+                373164,
+                c(305690, 305691, 305692)
+                ),
+  grupo.trz = c(rep("Consultas Infectología", 3),
+                "ELISA VIH",
+                "Genotipificación VIH",
+                rep("Recuento CD4", 3)
+                )
+)
+
+prestaciones <- trazadoras[prestaciones, on = "cod_prest"]
+
+
+```
+
+# 2. Funciones
+
+## 2.1 Revisión de los datos
+
+```{r CONTEO OBSERVACIONES EN CODIGO SELECCIONADO, eval=FALSE}
+countcod <- function(x, cod) { #donde x es el disk.frame y cod es el código de prestación
+  nr <- x %>% 
+  srckeep(c("codprestacion")) %>% 
+  filter(.x$codprestacion == {{cod}}) %>% 
+  collect() %>% 
+  nrow()
+  return(nr)
+}
+```
+
+## 2.2 Limpieza de datos para conteo por prestaciones
+
+```{r LIMPIEZA BASE DE DATOS CONTEO POR PRESTACION, message=F, warning=F}
+cleandata <- function(data, cod) { #donde x es el disk.frame y cod es el vector de códigos de prestación
+  data %>% 
+#  srckeep(c("cantidad", "fecemision", "codprestacion", "sexobeneficiario", "edadbeneficiario", "codfinanciador")) %>% 
+  filter(.data$codprestacion %in% {{cod}}) %>% 
+  mutate(date = as.Date(fecemision)) %>%
+  mutate(week = lubridate::week(date),
+         year = lubridate::year(date),
+         date_wk = as.POSIXct(paste(1, .data$week, .data$year, sep = "-" ), format = "%u-%U-%Y" ),
+         edad_cat = cut(.data$edadbeneficiario, seq(0, 80, 10), right = F),
+         prevision = as.character(ifelse(.data$codfinanciador %in% c(455, 937), "FONASA",
+                            ifelse(.data$codfinanciador %in% c(3174, 2144, 1645, 3045, 2155, 3421, 1620, 2366), "ISAPRE", "Otro"))),
+         region = factor(.data$codregion, 
+                         levels = c(15, 1:5, 13, 6, 7, 16, 8, 9, 14, 10:12),
+                         labels = c("Arica y Parinacota", "Tarapacá", "Antofagasta", "Atacama", "Coquimbo", 
+                                    "Valparaiso", "Metropolitana", "O'Higgins", "Maule", "Ñuble", "Biobío", 
+                                    "La Araucanía", "Los Ríos", "Los Lagos", "Aysén", "Magallanes"))
+         ) %>% 
+  group_by(.data$date_wk, .data$codprestacion, .data$sexobeneficiario, .data$edad_cat, .data$prevision, .data$region) %>%
+  summarise(n_prestacion = sum(cantidad, na.rm = T)) %>%
+
+  collect
+}
+```
+
+## 2.3 Limpieza de datos para conteo por rut
+
+```{r LIMPIEZA BASE DE DATOS CONTEO POR RUT versión actualizada}
+. <- dat.2018[
+    
+    #FILTROS
+  codprestacion %in% trazadoras[,codprestacion]][
+  
+    #RECODIFICACION
+  , edad_cat := as.factor(cut(edadbeneficiario, seq(0, 80, 10), right = F)) ][, edadbeneficiario := NULL][
+  , sexobeneficiario := as.factor(ifelse(sexobeneficiario == "I", NA, sexobeneficiario)) ][
+  , prevision := as.factor(ifelse(codfinanciador %in% c(455, 937), "FONASA",
+                            ifelse(codfinanciador %in% c(3174, 2144, 1645, 3045, 2155, 3421, 1620, 2366),
+                                   "ISAPRE", "Otro"))) ][, codfinanciador := NULL][
+
+    #NUEVAS VARIABLES
+  , date := as.Date(fecemision) ][, facemision := NULL][
+  , date_wk := as.Date(tsibble::yearweek(date)) ][
+  , week := lubridate::week(date_wk) ][
+  , year := lubridate::year(date_wk) ]
+
+dat.2018.dt <- .
+
+. <- dat.2019[
+    
+    #FILTROS
+  codprestacion %in% trazadoras[,codprestacion]][
+  
+    #RECODIFICACION
+  , edad_cat := as.factor(cut(edadbeneficiario, seq(0, 80, 10), right = F)) ][, edadbeneficiario := NULL][
+  , sexobeneficiario := as.factor(ifelse(sexobeneficiario == "I", NA, sexobeneficiario)) ][
+  , prevision := as.factor(ifelse(codfinanciador %in% c(455, 937), "FONASA",
+                            ifelse(codfinanciador %in% c(3174, 2144, 1645, 3045, 2155, 3421, 1620, 2366),
+                                   "ISAPRE", "Otro"))) ][, codfinanciador := NULL][
+
+    #NUEVAS VARIABLES
+  , date := as.Date(fecemision) ][, facemision := NULL][
+  , date_wk := as.Date(tsibble::yearweek(date)) ][
+  , week := lubridate::week(date_wk) ][
+  , year := lubridate::year(date_wk) ]
+  
+dat.2019.dt <- .
+
+. <- dat.2020[
+    
+    #FILTROS
+  codprestacion %in% trazadoras[,codprestacion]][
+  
+    #RECODIFICACION
+  , edad_cat := as.factor(cut(edadbeneficiario, seq(0, 80, 10), right = F)) ][, edadbeneficiario := NULL][
+  , sexobeneficiario := as.factor(ifelse(sexobeneficiario == "I", NA, sexobeneficiario)) ][
+  , prevision := as.factor(ifelse(codfinanciador %in% c(455, 937), "FONASA",
+                            ifelse(codfinanciador %in% c(3174, 2144, 1645, 3045, 2155, 3421, 1620, 2366),
+                                   "ISAPRE", "Otro"))) ][, codfinanciador := NULL][
+
+    #NUEVAS VARIABLES
+  , date := as.Date(fecemision) ][, facemision := NULL][
+  , date_wk := as.Date(tsibble::yearweek(date)) ][
+  , week := lubridate::week(date_wk) ][
+  , year := lubridate::year(date_wk) ]
+  
+dat.2020.dt <- .
+
+dat.ind <- rbind(dat.2018.dt, dat.2019.dt, dat.2020.dt)
+
+dat.ind <- full_join(dat.ind, trazadoras)
+
+. <- dat.ind[
+  , .(count_ind = .N), by = .(grupo.trz, week, year, date_wk, sexobeneficiario, edad_cat, prevision, rutbeneficiario)][
+  , grupo.trz := as.factor(grupo.trz) ]
+  
+dat <- .
+
+#save(dat, file = "C:/Users/sflor/Dropbox/Trabajo/ANID-Covid/Analisis IMED/output/DB/DB para modelos.RData")
+```
+
+```{r LIMPIEZA BASE DE DATOS CONTEO POR RUT, message=F, warning=F}
+cleandata.rut <- function(data, cod) { #donde x es el disk.frame y cod es el vector de códigos de prestación
+  data %>% 
+  srckeep(c("fecemision", "codprestacion", "sexobeneficiario", "edadbeneficiario", "codfinanciador", "rutbeneficiario")) %>% 
+  filter(.data$codprestacion %in% {{cod}}) %>% 
+  mutate(date = as.Date(fecemision)) %>%
+  mutate(week = lubridate::week(date),
+         year = lubridate::year(date),
+         date_wk = as.POSIXct(paste(1, .data$week, .data$year, sep = "-" ), format = "%u-%U-%Y" ),
+         edad_cat = cut(.data$edadbeneficiario, seq(0, 80, 10), right = F),
+         prevision = as.character(ifelse(.data$codfinanciador %in% c(455, 937), "FONASA",
+                            ifelse(.data$codfinanciador %in% c(3174, 2144, 1645, 3045, 2155, 3421, 1620, 2366), "ISAPRE", "Otro")))
+         ) %>% 
+  group_by(.data$date_wk, .data$sexobeneficiario, .data$edad_cat, .data$prevision, .data$rutbeneficiario) %>%
+
+  collect
+}
+```
+
+
+```{r TEST, eval = FALSE}
+codprest <- trazadoras[grupo.trz == "Recuento CD4"][, cod_prest]
+
+dat.pres.2020 <- cleandata.rut(data = dat.2020, cod = codprest)
+dat.pres.2019 <- cleandata(data = dat.2019, cod = codprest)
+dat.pres.2018 <- cleandata(data = dat.2018, cod = codprest)
+dat.pres <- rbind(dat.pres.2018, dat.pres.2019, dat.pres.2020)
+
+dat.pres %>% summary()
+
+dat.pres %>% 
+  group_by(date_wk) %>%
+  summarise(n_prestacion = n()) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) 
+```
+
+# 3. Iteración sobre todos los grupos de prestaciones
+
+## 3.1 Iteración gráficos para conteo por prestación
+
+### 3.1.1 VIH
+
+```{r ITERACION GRAFS PARA CONTEO POR PRESTACION VIH, message=F, warning=F}
+grp <- c("Consultas Infectología",
+"ELISA VIH",
+"Genotipificación VIH",
+"Recuento CD4")
+
+for (i in grp) {
+#Códigos
+codprest <- trazadoras[grupo.trz == i][, cod_prest]
+  
+#Datos
+
+dat.pres.2020 <- cleandata(data = dat.2020, cod = codprest)
+dat.pres.2019 <- cleandata(data = dat.2019, cod = codprest)
+dat.pres.2018 <- cleandata(data = dat.2018, cod = codprest)
+
+dat.pres <- rbind(dat.pres.2018, dat.pres.2019, dat.pres.2020)
+rm(dat.pres.2018, dat.pres.2019, dat.pres.2020)
+
+if (nrow(dat.pres) > 5) {
+
+#Gráficos
+prest <- trazadoras[grupo.trz == i, grupo.trz] %>% unique()
+
+g1 <- dat.pres %>% 
+  group_by(date_wk) %>%
+  summarise(n_prestacion = sum(n_prestacion, na.rm = T)) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  labs(x = "Fecha", y = "N", title = prest)
+
+g2 <- ggplot()+
+  theme_minimal()
+
+g3 <- dat.pres %>% 
+  filter(!(is.na(edad_cat))) %>% 
+  group_by(date_wk, edad_cat) %>%
+  summarise(n_prestacion = sum(n_prestacion, na.rm = T)) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion, color = edad_cat)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  labs(x = "Fecha", y = "N", color = "Edad")
+
+g4 <- dat.pres %>% 
+  group_by(date_wk, prevision) %>%
+  summarise(n_prestacion = sum(n_prestacion, na.rm = T)) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion, color = prevision)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  labs(x = "Fecha", y = "N", color = "Previsión")
+
+graf <- ggarrange(g1, g2, g3, g4, ncol = 2, nrow = 2)
+rm(g1, g3, g4)
+
+prest <- str_replace_all(prest, "[^[:alnum:]]", " ") %>% str_replace_all("  ", " ") %>% str_replace_all("  ", " ") %>% str_sub(1, 40)
+ggsave(filename = paste0("~/Dropbox/Analisis IMED/output/plots_prestaciones/Trazadoras/VIH agrupadas/conteo por código/", prest, ".png"),
+       plot = graf, device = "png", width = 9, height = 6, dpi = 300) 
+rm(graf, dat.pres, prest)
+
+  } else {print(paste(i, "hay menos de 5 filas de observaciones"))}
+}
+```
+
+## 3.2 Iteración gráficos para conteo por rut
+
+### 3.2.1 VIH
+
+```{r ITERACION GRAFS PARA CONTEO POR PRESTACION RUT Mama y CaCU, message=F, warning=F}
+grp <- c("Consultas Infectología",
+"ELISA VIH",
+"Genotipificación VIH",
+"Recuento CD4")
+
+for (i in grp) {
+
+#Códigos
+codprest <- trazadoras[grupo.trz == i][, cod_prest]
+  
+#Datos
+
+dat.pres.2020 <- cleandata.rut(data = dat.2020, cod = codprest)
+dat.pres.2019 <- cleandata.rut(data = dat.2019, cod = codprest)
+dat.pres.2018 <- cleandata.rut(data = dat.2018, cod = codprest)
+
+dat.pres <- rbind(dat.pres.2018, dat.pres.2019, dat.pres.2020)
+rm(dat.pres.2018, dat.pres.2019, dat.pres.2020)
+
+if (nrow(dat.pres) > 5) {
+
+#Gráficos
+prest <- trazadoras[grupo.trz == i, grupo.trz] %>% unique()
+
+g1 <- dat.pres %>% 
+  group_by(date_wk) %>%
+  summarise(n_prestacion = n()) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  labs(x = "Fecha", y = "N", title = prest)
+
+g2 <- ggplot() +
+  theme_minimal() 
+
+g3 <- dat.pres %>% 
+  filter(!(is.na(edad_cat))) %>% 
+  group_by(date_wk, edad_cat) %>%
+  summarise(n_prestacion = n()) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion, color = edad_cat)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  labs(x = "Fecha", y = "N", color = "Edad")
+
+g4 <- dat.pres %>% 
+  group_by(date_wk, prevision) %>%
+  summarise(n_prestacion = n()) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion, color = prevision)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  labs(x = "Fecha", y = "N", color = "Prestación")
+
+graf <- ggarrange(g1, g2, g3, g4, ncol = 2, nrow = 2)
+rm(g1, g2, g3, g4)
+
+prest <- str_replace_all(prest, "[^[:alnum:]]", " ") %>% str_replace_all("  ", " ") %>% str_replace_all("  ", " ") %>% str_sub(1, 40)
+ggsave(filename = paste0("C:/Users/sflor/Dropbox/Trabajo/ANID-Covid/Analisis IMED/output/plots_prestaciones/Trazadoras/Oncología agrupadas/conteo por rut/", "por rut ", prest, ".png"),
+       plot = graf, device = "png", width = 9, height = 6, dpi = 300) 
+rm(graf, dat.pres, prest)
+
+  } else {print(paste(i, "hay menos de 5 filas de observaciones"))}
+}
+```
+
+### 3.1.2 Cáncer otros
+
+```{r ITERACION GRAFS PARA CONTEO POR PRESTACION RUT, message=F, warning=F}
+grp <- c("Screening Cáncer Mamario (Mamografía)",
+"Screening Cáncer Mamario (Ecografía mamaria)",
+"Screening Cáncer Mamario (Resonancia magnética de mama)",
+"Screening Cáncer Cuello de Útero (Papanicolaou)", 
+"Screening Cáncer Cuello de Útero (Colposcopía)",
+"Screening Cáncer Cuello de Útero (Biopsia)")
+
+for (i in levels(as.factor(trazadoras[!(grupo.trz %in% grp)][, grupo.trz]))) {
+
+#Códigos
+codprest <- trazadoras[grupo.trz == i][, cod_prest]
+  
+#Datos
+
+dat.pres.2020 <- cleandata.rut(data = dat.2020, cod = codprest)
+dat.pres.2019 <- cleandata.rut(data = dat.2019, cod = codprest)
+dat.pres.2018 <- cleandata.rut(data = dat.2018, cod = codprest)
+
+dat.pres <- rbind(dat.pres.2018, dat.pres.2019, dat.pres.2020)
+rm(dat.pres.2018, dat.pres.2019, dat.pres.2020)
+
+if (nrow(dat.pres) > 5) {
+
+#Gráficos
+prest <- trazadoras[grupo.trz == i, grupo.trz] %>% unique()
+
+g1 <- dat.pres %>% 
+  group_by(date_wk) %>%
+  summarise(n_prestacion = n()) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  labs(x = "Fecha", y = "N", title = prest)
+
+g2 <- dat.pres %>% 
+  filter(sexobeneficiario %in% c("F", "M")) %>% 
+  group_by(date_wk, sexobeneficiario) %>%
+  summarise(n_prestacion = n()) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion, color = sexobeneficiario)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  labs(x = "Fecha", y = "N", color = "Sexo", title = "")
+
+g3 <- dat.pres %>% 
+  filter(!(is.na(edad_cat))) %>% 
+  group_by(date_wk, edad_cat) %>%
+  summarise(n_prestacion = n()) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion, color = edad_cat)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  labs(x = "Fecha", y = "N", color = "Edad")
+
+g4 <- dat.pres %>% 
+  group_by(date_wk, prevision) %>%
+  summarise(n_prestacion = n()) %>%
+  ggplot(aes(x = date_wk, y = n_prestacion, color = prevision)) +
+  geom_line(alpha = .3) +
+  geom_smooth(span = 0.1, se = F) +
+  geom_point(shape = 1, alpha = .3) + 
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2019, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 1, 2020, sep = "-" ), format = "%u-%U-%Y" )), linetype = 2) +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 42, 2019, sep = "-" ), format = "%u-%U-%Y" )), color = "purple") +
+  geom_vline(aes(xintercept = as.POSIXct(paste(1, 12, 2020, sep = "-" ), format = "%u-%U-%Y")), color = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  labs(x = "Fecha", y = "N", color = "Previsión")
+
+
+graf <- ggarrange(g1, g2, g3, g4, ncol = 2, nrow = 2)
+rm(g1, g2, g3, g4)
+
+prest <- str_replace_all(prest, "[^[:alnum:]]", " ") %>% str_replace_all("  ", " ") %>% str_replace_all("  ", " ") %>% str_sub(1, 40)
+ggsave(filename = paste0("C:/Users/sflor/Dropbox/Trabajo/ANID-Covid/Analisis IMED/output/plots_prestaciones/Trazadoras/Oncología agrupadas/conteo por rut/", "por rut ", prest, ".png"),
+       plot = graf, device = "png", width = 9, height = 6, dpi = 300) 
+rm(graf, dat.pres, prest)
+
+  } else {print(paste(i, "hay menos de 5 filas de observaciones"))}
+}
+```
+

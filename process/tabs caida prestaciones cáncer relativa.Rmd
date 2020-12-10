@@ -1,0 +1,353 @@
+---
+title: "Tablas resumen informe prestaciones"
+subtitle: "Cáncer"
+output: 
+---
+
+```{r RMD SETTINGS, message=FALSE, warning=FALSE}
+rm(list = ls()); gc() 
+knitr::opts_knit$set(root.dir = "C:/Users/sflor/Documents/Data IMED/Prestaciones/")
+```
+
+```{r LIBRERIAS, message=FALSE, warning=FALSE}
+library(disk.frame)
+library(data.table)
+library(tidyverse)
+library(lubridate)
+library(ggpubr)
+```
+
+# 1. Datos
+```{r DISK.FRAME SETTINGS, message=FALSE, warning=FALSE}
+setup_disk.frame(workers = 3)
+options(future.globals.maxSize = Inf)
+```
+
+```{r LOAD DATA YEAR, message=F}
+path_to_files <- "C:/Users/sflor/Documents/Data IMED/Prestaciones"
+
+list_files <- list.files(path = path_to_files, 
+                         pattern = "txb_resumenprestacion_u2020", 
+                         full.names = TRUE) 
+
+system.time(dat.2020 <- csv_to_disk.frame(infile = list_files,
+                                     backend = "data.table",
+                                     colClasses = list(character = c("coditem") ),
+                                     select = c("fecemision", "codprestacion", "sexobeneficiario", "edadbeneficiario", 
+                                                "codfinanciador", "rutbeneficiario", "codregion")))
+
+list_files <- list.files(path = path_to_files, 
+                         pattern = "txb_resumenprestacion_u2019", 
+                         full.names = TRUE) 
+
+system.time(dat.2019 <- csv_to_disk.frame(infile = list_files,
+                                     backend = "data.table",
+                                     colClasses = list(character = c("coditem") ),
+                                     select = c("fecemision", "codprestacion", "sexobeneficiario", "edadbeneficiario", 
+                                                "codfinanciador", "rutbeneficiario", "codregion")))
+
+list_files <- list.files(path = path_to_files, 
+                         pattern = "txb_resumenprestacion_u2018", 
+                         full.names = TRUE) 
+
+system.time(dat.2018 <- csv_to_disk.frame(infile = list_files,
+                                     backend = "data.table",
+                                     colClasses = list(character = c("coditem") ),
+                                     select = c("fecemision", "codprestacion", "sexobeneficiario", "edadbeneficiario", 
+                                                "codfinanciador", "rutbeneficiario", "codregion")))
+
+#system.time(dat <- as.data.table(dat.2020))
+
+rm(list_files, path_to_files)
+```
+
+```{r SELECCION PRESTACIONES}
+prestaciones <- fread("C:/Users/sflor/Documents/Data IMED/Diccionarios/dom_codprestacion_000", encoding = "UTF-8")
+
+trazadoras <- data.table(
+  cod_prest = c(c(101211, 101331, 101821, 101830, 101831, 101836,
+                                  101904, 101905, 101914, 101918),
+                308004,
+                c(1801004, 1801005, 1801006, 1801007),
+                c(1801037, 1801040),
+                c(1801001, 1801002, 1801003, 1801053),
+                c(401010, 401110, 401130, 404025, 404026),
+                c(404012, 404024),
+                405031,
+                c(801001, 801806),
+                2001002,
+                2001014,
+                c(305009, 305170),
+                308009,
+                501135
+                ),
+  grupo.trz = c(rep("Consultas Oncología", 10),
+                "Screening Cáncer Colon (Hemorragias Ocultas)",
+                rep("Screening Cáncer Colon (Sigmoidoscopia y Colonoscopía)", 4),
+                rep("Screening Cáncer Gástrico (Ureasa)", 2),
+                rep("Screening Cáncer Gástrico (Esofagoscopía, Gastroduodenoscopía, Yeyuno Ileoscopia)", 4),
+                rep("Screening Cáncer Mamario (Mamografía)", 5),
+                rep("Screening Cáncer Mamario (Ecografía mamaria)", 2),
+                "Screening Cáncer Mamario (Resonancia magnética de mama)",
+                rep("Screening Cáncer Cuello de Útero (Papanicolaou)", 2),
+                "Screening Cáncer Cuello de Útero (Colposcopía)",
+                "Screening Cáncer Cuello de Útero (Biopsia)",
+                rep("Screening Cáncer (Antígenos Cea, Ca 125, Ca 15-3 y Ca 19-9)", 2),
+                "Screening Cáncer (Células Neoplásicas)",
+                "Diagnóstico y Seguimiento Cáncer (Pet Ct)"
+                )
+)
+
+prestaciones <- trazadoras[prestaciones, on = "cod_prest"]
+
+trazadoras <- trazadoras[, codprestacion := cod_prest][, cod_prest := NULL]
+```
+
+# 2. Funciones
+
+## 2.1 Limpieza de datos para conteo por rut
+
+```{r LIMPIEZA BASE DE DATOS CONTEO POR RUT}
+cleandata.rut <- function(data, cod) { #donde x es el disk.frame y cod es el vector de códigos de prestación
+  data %>% 
+  srckeep(c("fecemision", "codprestacion", "sexobeneficiario", "edadbeneficiario", "codfinanciador", "rutbeneficiario", "codregion")) %>% 
+  filter(.data$codprestacion %in% {{cod}}) %>% 
+  mutate(date = as.Date(fecemision)) %>%
+  mutate(week = lubridate::week(date),
+         month = lubridate::month(date),
+         year = lubridate::year(date),
+         date_wk = as.POSIXct(paste(1, .data$week, .data$year, sep = "-" ), format = "%u-%U-%Y" ),
+         date_mth = as.POSIXct(paste(1, .data$month, .data$year, sep = "-" ), format = "%u-%U-%Y" ),
+         edad_cat = cut(.data$edadbeneficiario, seq(0, 80, 10), right = F),
+         prevision = as.character(ifelse(.data$codfinanciador %in% c(455, 937), "FONASA",
+                            ifelse(.data$codfinanciador %in% c(3174, 2144, 1645, 3045, 2155, 3421, 1620, 2366), "ISAPRE", "Otro"))),
+         region = factor(.data$codregion, 
+                         levels = c(15, 1:5, 13, 6, 7, 16, 8, 9, 14, 10:12),
+                         labels = c("Arica y Parinacota", "Tarapacá", "Antofagasta", "Atacama", "Coquimbo", 
+                                    "Valparaiso", "Metropolitana", "O'Higgins", "Maule", "Ñuble", "Biobío", 
+                                    "La Araucanía", "Los Ríos", "Los Lagos", "Aysén", "Magallanes"))
+         ) %>% 
+    filter(week > 11, week < 36) %>% 
+  group_by(.data$date_wk, .data$week, .data$sexobeneficiario, .data$edad_cat, .data$prevision, .data$rutbeneficiario, .data$region) %>%
+
+  collect
+}
+```
+
+# 3. Tablas de resumen
+
+```{r DATOS TABLAS}
+codprest <- trazadoras[, codprestacion]
+#codprest <- trazadoras[grupo.trz == "Screening Cáncer (Antígenos)"][, codprestacion]
+
+dat.pres.2020 <- cleandata.rut(data = dat.2020, cod = codprest)
+dat.pres.2019 <- cleandata.rut(data = dat.2019, cod = codprest)
+dat.pres.2018 <- cleandata.rut(data = dat.2018, cod = codprest)
+
+dat.pres <- rbind(dat.pres.2018, dat.pres.2019, dat.pres.2020)
+
+dat.pres <- full_join(dat.pres, trazadoras)
+```
+
+# 3.1 Tabla 1: general
+```{r TABLA 1, message=F, warning=F}
+tab.wk <- dat.pres %>% 
+  group_by(grupo.trz, week, year) %>%
+  summarise(n_prestacion = n()) %>% 
+  pivot_wider(id_cols = c(grupo.trz, week), names_from = year, names_prefix = "year", values_from = n_prestacion) %>% 
+  group_by(grupo.trz, week) %>%
+  mutate(base_line = mean(c(year2018, year2019), na.rm = T),
+         var_abs = (year2020 - base_line),
+         var_rel = (var_abs/max(base_line))*100,
+         date = as.POSIXct(paste(1, .data$week, 2020, sep = "-" ), format = "%u-%U-%Y")
+  ) %>% 
+  group_by(grupo.trz) %>%
+  summarise(week_mean = mean(base_line, na.rm = T),
+            week_mean_var_abs = mean(var_abs, na.rm = T),
+            week_mean_var_rel = mean(var_rel, na.rm = T))
+
+tab.mth <- dat.pres %>% 
+  group_by(grupo.trz, month, year) %>%
+  summarise(n_prestacion = n()) %>% 
+  pivot_wider(id_cols = c(grupo.trz, month), names_from = year, names_prefix = "year", values_from = n_prestacion) %>% 
+  group_by(grupo.trz, month) %>%
+  mutate(base_line = mean(c(year2018, year2019), na.rm = T),
+         var_abs = (year2020 - base_line),
+         var_rel = (var_abs/max(base_line))*100,
+         date = as.POSIXct(paste(1, .data$month, 2020, sep = "-" ), format = "%u-%U-%Y")
+  ) %>% 
+  group_by(grupo.trz) %>%
+  summarise(month_mean = mean(base_line, na.rm = T),
+            month_mean_var_abs = mean(var_abs, na.rm = T),
+            month_mean_var_rel = mean(var_rel, na.rm = T))
+
+tab1 <- full_join(tab.wk, tab.mth) 
+colnames(tab1) <- c("Grupo Prestaciones",	"Media semanal 2018-2019",	"Variación semanal absoluta",	"Variación semanal relativa",	"Media mesual 2018-2019",	"Variación mensual absoluta",	"Variación mensual relativa")
+tab1[2:7] <- round(tab1[2:7], 2)
+```
+
+# 3.2 Tabla 2: por sexo
+```{r TABLA 2, message=F, warning=F}
+tab.wk <- dat.pres %>% 
+  filter(sexobeneficiario %in% c("F", "M")) %>% 
+  group_by(grupo.trz, week, year, sexobeneficiario) %>%
+  summarise(n_prestacion = n()) %>% 
+  pivot_wider(id_cols = c(grupo.trz, week, sexobeneficiario), names_from = year, names_prefix = "year", values_from = n_prestacion) %>% 
+  group_by(grupo.trz, week, sexobeneficiario) %>%
+  mutate(base_line = mean(c(year2018, year2019), na.rm = T),
+         var_abs = (year2020 - base_line),
+         var_rel = (var_abs/max(base_line))*100,
+         date = as.POSIXct(paste(1, .data$week, 2020, sep = "-" ), format = "%u-%U-%Y")
+  ) %>% 
+  group_by(grupo.trz, sexobeneficiario) %>%
+  summarise(week_mean = mean(base_line, na.rm = T),
+            week_mean_var_abs = mean(var_abs, na.rm = T),
+            week_mean_var_rel = mean(var_rel, na.rm = T))
+
+tab.mth <- dat.pres %>% 
+  filter(sexobeneficiario %in% c("F", "M")) %>% 
+  group_by(grupo.trz, month, year, sexobeneficiario) %>%
+  summarise(n_prestacion = n()) %>% 
+  pivot_wider(id_cols = c(grupo.trz, month, sexobeneficiario), names_from = year, names_prefix = "year", values_from = n_prestacion) %>% 
+  group_by(grupo.trz, month, sexobeneficiario) %>%
+  mutate(base_line = mean(c(year2018, year2019), na.rm = T),
+         var_abs = (year2020 - base_line),
+         var_rel = (var_abs/max(base_line))*100,
+         date = as.POSIXct(paste(1, .data$month, 2020, sep = "-" ), format = "%u-%U-%Y")
+  ) %>% 
+  group_by(grupo.trz, sexobeneficiario) %>%
+  summarise(month_mean = mean(base_line, na.rm = T),
+            month_mean_var_abs = mean(var_abs, na.rm = T),
+            month_mean_var_rel = mean(var_rel, na.rm = T))
+
+tab2 <- full_join(tab.wk, tab.mth) 
+colnames(tab2) <- c("Grupo Prestaciones",	"Sexo", "Media semanal 2018-2019",	"Variación semanal absoluta",	"Variación semanal relativa",	"Media mesual 2018-2019",	"Variación mensual absoluta",	"Variación mensual relativa")
+tab2[3:8] <- round(tab2[3:8], 2)
+```
+
+# 3.3 Tabla 3: por previsión
+```{r TABLA 3, message=F, warning=F}
+tab.wk <- dat.pres %>% 
+  group_by(grupo.trz, week, year, prevision) %>%
+  summarise(n_prestacion = n()) %>% 
+  pivot_wider(id_cols = c(grupo.trz, week, prevision), names_from = year, names_prefix = "year", values_from = n_prestacion) %>% 
+  group_by(grupo.trz, week, prevision) %>%
+  mutate(base_line = mean(c(year2018, year2019), na.rm = T),
+         var_abs = (year2020 - base_line),
+         var_rel = (var_abs/max(base_line))*100,
+         date = as.POSIXct(paste(1, .data$week, 2020, sep = "-" ), format = "%u-%U-%Y")
+  ) %>% 
+  group_by(grupo.trz, prevision) %>%
+  summarise(week_mean = mean(base_line, na.rm = T),
+            week_mean_var_abs = mean(var_abs, na.rm = T),
+            week_mean_var_rel = mean(var_rel, na.rm = T))
+
+tab.mth <- dat.pres %>% 
+  group_by(grupo.trz, month, year, prevision) %>%
+  summarise(n_prestacion = n()) %>% 
+  pivot_wider(id_cols = c(grupo.trz, month, prevision), names_from = year, names_prefix = "year", values_from = n_prestacion) %>% 
+  group_by(grupo.trz, month, prevision) %>%
+  mutate(base_line = mean(c(year2018, year2019), na.rm = T),
+         var_abs = (year2020 - base_line),
+         var_rel = (var_abs/max(base_line))*100,
+         date = as.POSIXct(paste(1, .data$month, 2020, sep = "-" ), format = "%u-%U-%Y")
+  ) %>% 
+  group_by(grupo.trz, prevision) %>%
+  summarise(month_mean = mean(base_line, na.rm = T),
+            month_mean_var_abs = mean(var_abs, na.rm = T),
+            month_mean_var_rel = mean(var_rel, na.rm = T))
+
+tab3 <- full_join(tab.wk, tab.mth) 
+colnames(tab3) <- c("Grupo Prestaciones",	"Previsión", "Media semanal 2018-2019",	"Variación semanal absoluta",	"Variación semanal relativa",	"Media mesual 2018-2019",	"Variación mensual absoluta",	"Variación mensual relativa")
+tab3[3:8] <- round(tab3[3:8], 2)
+```
+
+# 3.4 Tabla 4: por edad
+```{r TABLA 4, message=F, warning=F}
+tab.wk <- dat.pres %>% 
+  group_by(grupo.trz, week, year, edad_cat) %>%
+  summarise(n_prestacion = n()) %>% 
+  pivot_wider(id_cols = c(grupo.trz, week, edad_cat), names_from = year, names_prefix = "year", values_from = n_prestacion) %>% 
+  group_by(grupo.trz, week, edad_cat) %>%
+  mutate(base_line = mean(c(year2018, year2019), na.rm = T),
+         var_abs = (year2020 - base_line),
+         var_rel = (var_abs/max(base_line))*100,
+         date = as.POSIXct(paste(1, .data$week, 2020, sep = "-" ), format = "%u-%U-%Y")
+  ) %>% 
+  group_by(grupo.trz, edad_cat) %>%
+  summarise(week_mean = mean(base_line, na.rm = T),
+            week_mean_var_abs = mean(var_abs, na.rm = T),
+            week_mean_var_rel = mean(var_rel, na.rm = T))
+
+tab.mth <- dat.pres %>% 
+  group_by(grupo.trz, month, year, edad_cat) %>%
+  summarise(n_prestacion = n()) %>% 
+  pivot_wider(id_cols = c(grupo.trz, month, edad_cat), names_from = year, names_prefix = "year", values_from = n_prestacion) %>% 
+  group_by(grupo.trz, month, edad_cat) %>%
+  mutate(base_line = mean(c(year2018, year2019), na.rm = T),
+         var_abs = (year2020 - base_line),
+         var_rel = (var_abs/max(base_line))*100,
+         date = as.POSIXct(paste(1, .data$month, 2020, sep = "-" ), format = "%u-%U-%Y")
+  ) %>% 
+  group_by(grupo.trz, edad_cat) %>%
+  summarise(month_mean = mean(base_line, na.rm = T),
+            month_mean_var_abs = mean(var_abs, na.rm = T),
+            month_mean_var_rel = mean(var_rel, na.rm = T))
+
+tab4 <- full_join(tab.wk, tab.mth) 
+colnames(tab4) <- c("Grupo Prestaciones",	"Edad", "Media semanal 2018-2019",	"Variación semanal absoluta",	"Variación semanal relativa",	"Media mesual 2018-2019",	"Variación mensual absoluta",	"Variación mensual relativa")
+tab4[3:8] <- round(tab4[3:8], 2)
+```
+
+# 3.4 Tabla 5: por región
+```{r TABLA 5, message=F, warning=F}
+tab.wk <- dat.pres %>% 
+  group_by(grupo.trz, week, year, region) %>%
+  summarise(n_prestacion = n()) %>% 
+  pivot_wider(id_cols = c(grupo.trz, week, region), names_from = year, names_prefix = "year", values_from = n_prestacion) %>% 
+  group_by(grupo.trz, week, region) %>%
+  mutate(base_line = mean(c(year2018, year2019), na.rm = T),
+         var_abs = (year2020 - base_line),
+         var_rel = (var_abs/max(base_line))*100,
+         date = as.POSIXct(paste(1, .data$week, 2020, sep = "-" ), format = "%u-%U-%Y")
+  ) %>% 
+  group_by(grupo.trz, region) %>%
+  summarise(week_mean = mean(base_line, na.rm = T),
+            week_mean_var_abs = mean(var_abs, na.rm = T),
+            week_mean_var_rel = mean(var_rel, na.rm = T))
+
+tab.mth <- dat.pres %>% 
+  group_by(grupo.trz, month, year, region) %>%
+  summarise(n_prestacion = n()) %>% 
+  pivot_wider(id_cols = c(grupo.trz, month, region), names_from = year, names_prefix = "year", values_from = n_prestacion) %>% 
+  group_by(grupo.trz, month, region) %>%
+  mutate(base_line = mean(c(year2018, year2019), na.rm = T),
+         var_abs = (year2020 - base_line),
+         var_rel = (var_abs/max(base_line))*100,
+         date = as.POSIXct(paste(1, .data$month, 2020, sep = "-" ), format = "%u-%U-%Y")
+  ) %>% 
+  group_by(grupo.trz, region) %>%
+  summarise(month_mean = mean(base_line, na.rm = T),
+            month_mean_var_abs = mean(var_abs, na.rm = T),
+            month_mean_var_rel = mean(var_rel, na.rm = T))
+
+tab5 <- full_join(tab.wk, tab.mth) 
+colnames(tab5) <- c("Grupo Prestaciones",	"Región", "Media semanal 2018-2019",	"Variación semanal absoluta",	"Variación semanal relativa",	"Media mesual 2018-2019",	"Variación mensual absoluta",	"Variación mensual relativa")
+tab5[3:8] <- round(tab5[3:8], 2)
+```
+
+
+
+```{r EXPORT TABLES}
+write.csv2(tab1, file = "C:/Users/sflor/Dropbox/Trabajo/ANID-Covid/Analisis IMED/output/tabs_prestaciones/caida prestaciones.csv", 
+           sep = ";", dec = ".")
+write.csv2(tab2, file = "C:/Users/sflor/Dropbox/Trabajo/ANID-Covid/Analisis IMED/output/tabs_prestaciones/caida prestaciones por sexo.csv", 
+           sep = ";", dec = ".")
+write.csv2(tab3, file = "C:/Users/sflor/Dropbox/Trabajo/ANID-Covid/Analisis IMED/output/tabs_prestaciones/caida prestaciones por prevision.csv", 
+           sep = ";", dec = ".")
+write.csv2(tab4, file = "C:/Users/sflor/Dropbox/Trabajo/ANID-Covid/Analisis IMED/output/tabs_prestaciones/caida prestaciones por edad.csv", 
+           sep = ";", dec = ".")
+write.csv2(tab5, file = "C:/Users/sflor/Dropbox/Trabajo/ANID-Covid/Analisis IMED/output/tabs_prestaciones/caida prestaciones por región.csv", 
+           sep = ";", dec = ".")
+```
+
